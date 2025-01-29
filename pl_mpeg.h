@@ -1570,27 +1570,40 @@ uint32_t plm_buffer_tell(plm_buffer_t *self) {
 }
 
 void plm_buffer_discard_read_bytes(plm_buffer_t *self) {
+#ifndef NEW_WAY
 	size_t byte_pos = self->bit_index >> 3;
 	if (byte_pos == self->length) {
 		self->bit_index = 0;
 		self->length = 0;
-	}
-	else if (byte_pos > 0) {
+	} else if (byte_pos > 0) {
         // This normally moves only the last 4 bytes; calling memmove is a waste of time
-        if (self->length - byte_pos < 8) {
+        if (self->length - byte_pos < 16) {
             uint8_t *d = self->bytes;
             uint8_t *s = &self->bytes[byte_pos];
             uint8_t *pEnd = &self->bytes[self->length];
             while (s < pEnd) {
                 *d++ = *s++;
             }
+        } else {
+            memmove(self->bytes, self->bytes + byte_pos, self->length - byte_pos);
+        }
+        self->bit_index -= byte_pos << 3;
+        self->length -= byte_pos;
+	}
+#else
+    size_t byte_pos = self->bit_index >> 3;
+    if (byte_pos >= self->length)
+    {
+            self->bit_index = 0;
+            self->length = 0;
+    }
+    else if (byte_pos > 0)
+    {
+            memmove(self->bytes, self->bytes + byte_pos, self->length - byte_pos);
             self->bit_index -= byte_pos << 3;
             self->length -= byte_pos;
-        } else { // no need to move anything
-            byte_pos |= 0;
-//            memmove(self->bytes, self->bytes + byte_pos, self->length - byte_pos);
-        }
-	}
+    }
+#endif
 }
 
 void plm_buffer_load_file_callback(plm_buffer_t *self, void *user) {
@@ -2785,7 +2798,7 @@ struct plm_video_t {
 	int macroblock_intra;
 
 	int dc_predictor[3];
-
+    
 	plm_buffer_t *buffer;
 	int destroy_buffer_when_done;
 
@@ -3285,7 +3298,7 @@ void plm_video_decode_macroblock(plm_video_t *self) {
 		self->macroblock_address++;
 	}
 
-	self->mb_row = self->macroblock_address / self->mb_width;
+    self->mb_row = self->macroblock_address / self->mb_width;
 	self->mb_col = self->macroblock_address % self->mb_width;
 
 	if (self->mb_col >= self->mb_width || self->mb_row >= self->mb_height) {
@@ -3531,13 +3544,13 @@ void plm_video_process_macroblock(
         case 3: // 2x2 average
         {
             int dest_scan = dw - block_size;
-            int a0, b0, a1, b1;
+            int a0, b0;
             for (int y = 0; y < block_size; y++) {
-                a0 = s[si]; a1 = s[si+dw];
+                a0 = s[si] + s[si+dw];
                 for (int x = 0; x < block_size; x++) {
-                    b0 = s[si+1]; b1 = s[si+dw+1];
-                    d[di] = (a0+b0+a1+b1+2)>>2;
-                    a0 = b0; a1 = b1;
+                    b0 = s[si+1] + s[si+dw+1];
+                    d[di] = (a0+b0+2)>>2;
+                    a0 = b0;
                     si++; di++;
                 } // for x
                 si += dest_scan;
@@ -3697,7 +3710,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		}
 
 		n += run;
-		if (n < 0 || n >= 64) {
+		if (n >= 64) {
 			return; // invalid
 		}
 
