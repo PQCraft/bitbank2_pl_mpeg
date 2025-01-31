@@ -146,8 +146,7 @@ See below for detailed the API documentation.
 #include <stdint.h>
 #include <stdio.h>
 
-#if defined(__arm64__) || defined(__aarch64__) || defined (__arm__)
-#define ARM_NEON
+#ifdef __ARM_NEON
 #include <arm_neon.h>
 #endif
 
@@ -1503,7 +1502,6 @@ uint32_t plm_buffer_write(plm_buffer_t *self, uint8_t *bytes, uint32_t length) {
 	if (self->mode == PLM_BUFFER_MODE_FIXED_MEM) {
 		return 0;
 	}
-
 	if (self->discard_read_bytes) {
 		// This should be a ring buffer, but instead it just shifts all unread 
 		// data to the beginning of the buffer and appends new data at the end. 
@@ -2212,7 +2210,7 @@ double plm_demux_decode_time(plm_demux_t *self) {
 }
 
 plm_packet_t *plm_demux_decode_packet(plm_demux_t *self, int type) {
-	if (!plm_buffer_has(self->buffer, 16 << 3)) {
+	if (!plm_buffer_has(self->buffer, 20 << 3)) {
 		return NULL;
 	}
 
@@ -2843,7 +2841,7 @@ void plm_video_copy_macroblock(plm_video_t *self, plm_frame_t *s, int motion_h, 
 void plm_video_interpolate_macroblock(plm_video_t *self, plm_frame_t *s, int motion_h, int motion_v);
 void plm_video_process_macroblock(plm_video_t *self, uint8_t *s, uint8_t *d, int mh, int mb, int bs, int interp);
 void plm_video_decode_block(plm_video_t *self, int block);
-void plm_video_idct(int *block, int iMaxIndex);
+void plm_video_idct(int32_t *block, int iMaxIndex);
 void plm_make_fast_vlc(plm_video_t *self);
 
 //
@@ -3252,8 +3250,8 @@ void plm_video_decode_slice(plm_video_t *self, int slice) {
 
 void plm_video_decode_macroblock(plm_video_t *self) {
 	// Decode increment
-	int increment = 0;
-	int t = plm_buffer_read_vlc(self->buffer, PLM_VIDEO_MACROBLOCK_ADDRESS_INCREMENT);
+	int t, increment = 0;
+	t = plm_buffer_read_vlc(self->buffer, PLM_VIDEO_MACROBLOCK_ADDRESS_INCREMENT);
 
 	while (t == 34) {
 		// macroblock_stuffing
@@ -3525,7 +3523,7 @@ void plm_video_process_macroblock(
     case 0:
         PLM_BLOCK_COPY(d, di, dw, si, dw, block_size, s[si]);
         break;
-#ifdef ARM_NEON
+#ifdef __ARM_NEON
         case 1:
             // 1x2 vertical averaging
             s += si; d += di;
@@ -3588,7 +3586,7 @@ void plm_video_process_macroblock(
 //		PLM_MB_CASE(0, 1, 1, (s[si] + s[si + 1] + s[si + dw] + s[si + dw + 1] + 2) >> 2);
         case 3: // 2x2 average
         {
-#ifdef ARM_NEON
+#ifdef __ARM_NEON
             s += si; d += di;
             if (block_size == 8) {
                 uint8x8_t u88_a1, u88_b1;
@@ -3614,8 +3612,8 @@ void plm_video_process_macroblock(
                 uint16x8_t u168_ab0L, u168_ab0H, u168_ab1L, u168_ab1H;
                 u816_a1 = vld1q_u8(s); // pre-load the first row
                 u816_b1 = vld1q_u8(s+1);
-                u168_ab0L = vaddl_u8(vget_low_u8(u816_a1), vget_low_u16(u816_b1)); // horizontal add of current line
-                u168_ab0H = vaddl_u8(vget_high_u8(u816_a1), vget_high_u16(u816_b1));
+                u168_ab0L = vaddl_u8(vget_low_u8(u816_a1), vget_low_u8(u816_b1)); // horizontal add of current line
+                u168_ab0H = vaddl_u8(vget_high_u8(u816_a1), vget_high_u8(u816_b1));
                 s += dw;
                 for (int y = 0; y<16; y++) {
                     u816_a1 = vld1q_u8(s);
@@ -3870,7 +3868,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
             s[0] = 0;
 		} else {
 			plm_video_idct(s, n);
-#ifdef ARM_NEON
+#ifdef __ARM_NEON
             {
                 // the source data is contiguous, the destination is not
                 int32x4_t in0_32, in1_32; // to hold 8 x uint32_t's which will get narrowed and clipped
@@ -3881,7 +3879,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
                     in0_32 = vld1q_s32(s);
                     in1_32 = vld1q_s32(s+4);
                     s += 8;
-                    in0_16 = vcombine_u16(vqmovn_s32(in0_32), vqmovn_s32(in1_32));
+                    in0_16 = vreinterpretq_u16_s16(vcombine_s16(vqmovn_s32(in0_32), vqmovn_s32(in1_32)));
                     in0_8 = vqmovn_u16(in0_16); // narrow and clamp to uint8_t
                     vst1_u8(d, in0_8);
                     d += dw;
@@ -3897,7 +3895,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		// Add data to the predicted macroblock
 		if (n == 1) {
 			int16_t value = (s[0] + 128) >> 8;
-#ifdef ARM_NEON
+#ifdef __ARM_NEON
             // The challenge is that the 'value' is a signed 8-bit number that needs to be added
             // to an unsigned 8-bit value and then clamped to 8-bits unsigned again
             {
@@ -3921,7 +3919,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		}
 		else {
 			plm_video_idct(s, n);
-#ifdef ARM_NEON
+#ifdef __ARM_NEON
             {
                 int16x8_t i16_s, i16_d;
                 int32x4_t i32_0, i32_1;
@@ -3948,7 +3946,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	}
 }
 
-void plm_video_idct(int *block, int iMaxIndex) {
+void plm_video_idct(int32_t *block, int iMaxIndex) {
 	int
 		b1, b3, b4, b6, b7, tmp1, tmp2, m0,
 		x0, x1, x2, x3, x4, y3, y4, y5, y6, y7;
@@ -4471,7 +4469,7 @@ int plm_audio_find_frame_sync(plm_audio_t *self) {
 }
 
 int plm_audio_decode_header(plm_audio_t *self) {
-	if (!plm_buffer_has(self->buffer, 48)) {
+	if (!plm_buffer_has(self->buffer, 64)) {
 		return 0;
 	}
 
