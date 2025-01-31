@@ -146,6 +146,10 @@ See below for detailed the API documentation.
 #include <stdint.h>
 #include <stdio.h>
 
+#if defined(__arm64__) || defined(__aarch64__) || defined (__arm__)
+#define ARM_NEON
+#include <arm_neon.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -2797,7 +2801,7 @@ struct plm_video_t {
 	int macroblock_type;
 	int macroblock_intra;
 
-	int dc_predictor[3];
+	int32_t dc_predictor[3];
     
 	plm_buffer_t *buffer;
 	int destroy_buffer_when_done;
@@ -2808,7 +2812,7 @@ struct plm_video_t {
 
     uint16_t *fast_vlc;
 
-	int block_data[64];
+	int32_t block_data[64];
 	uint8_t intra_quant_matrix[64];
 	uint8_t non_intra_quant_matrix[64];
 
@@ -3521,41 +3525,131 @@ void plm_video_process_macroblock(
     case 0:
         PLM_BLOCK_COPY(d, di, dw, si, dw, block_size, s[si]);
         break;
+#ifdef ARM_NEON
+        case 1:
+            // 1x2 vertical averaging
+            s += si; d += di;
+            if (block_size == 8) {
+                uint8x8_t u88_a, u88_b;
+                uint16x8_t u168_ab;
+                u88_a = vld1_u8(s); // pre-load the first row
+                s += dw;
+                for (int y = 0; y<8; y++) {
+                    u88_b = vld1_u8(s);
+                    u168_ab = vaddl_u8(u88_a, u88_b); // vertical add of next line
+                    u88_a = vrshrn_n_u16(u168_ab, 1); // shift right with rounding
+                    vst1_u8(d, u88_a);
+                    u88_a = u88_b; // upper line becomes lower
+                    s += dw;
+                    d += dw;
+                }
+            } else { // 16
+                uint8x8_t u88;
+                uint8x16_t u816_a, u816_b;
+                uint16x8_t u168_L, u168_H;
+                u816_a = vld1q_u8(s); // pre-load the first row
+                s += dw;
+                for (int y = 0; y<16; y++) {
+                    u816_b = vld1q_u8(s);
+                    u168_L = vaddl_u8(vget_low_u8(u816_a), vget_low_u8(u816_b)); // vert add of next line
+                    u168_H = vaddl_u8(vget_high_u8(u816_a), vget_high_u8(u816_b));
+                    u88 = vrshrn_n_u16(u168_L, 1); // shift right with rounding
+                    vst1_u8(d, u88);
+                    u88 = vrshrn_n_u16(u168_H, 1);
+                    vst1_u8(d+8, u88);
+                    u816_a = u816_b; // upper line becomes lower
+                    s += dw;
+                    d += dw;
+                }
+            }
+            break;
+#else
 		PLM_MB_CASE(0, 0, 1, (s[si] + s[si + dw] + 1) >> 1);
+#endif
 //            PLM_MB_CASE(0, 1, 0, (s[si] + s[si + 1] + 1) >> 1);
         case 2: // 2x1 (horizontal) average of sample pairs
         {
             int dest_scan = dw - block_size;
             int a, b;
+            s += si; d += di;
             for (int y = 0; y < block_size; y++) {
-                a = s[si];
+                a = s[0];
                 for (int x = 0; x < block_size; x++) {
-                    b = s[si+1];
-                    d[di] = (a+b+1)>>1;
+                    b = s[1];
+                    d[0] = (a+b+1)>>1;
                     a = b;
-                    si++; di++;
+                    s++; d++;
                 } // for x
-                si += dest_scan;
-                di += dest_scan;
+                s += dest_scan;
+                d += dest_scan;
             } // for y
         }
             break;
 //		PLM_MB_CASE(0, 1, 1, (s[si] + s[si + 1] + s[si + dw] + s[si + dw + 1] + 2) >> 2);
         case 3: // 2x2 average
         {
+#ifdef ARM_NEON
+            s += si; d += di;
+            if (block_size == 8) {
+                uint8x8_t u88_a1, u88_b1;
+                uint16x8_t u168_ab0, u168_ab1;
+                u88_a1 = vld1_u8(s); // pre-load the first row
+                u88_b1 = vld1_u8(s+1);
+                u168_ab0 = vaddl_u8(u88_a1, u88_b1); // horizontal add of current line
+                s += dw;
+                for (int y = 0; y<8; y++) {
+                    u88_a1 = vld1_u8(s);
+                    u88_b1 = vld1_u8(s+1);
+                    u168_ab1 = vaddl_u8(u88_a1, u88_b1); // horiz add of next line
+                    u168_ab0 = vaddq_u16(u168_ab0, u168_ab1); // vertical add
+                    u88_a1 = vrshrn_n_u16(u168_ab0, 2); // shift right with rounding
+                    vst1_u8(d, u88_a1);
+                    u168_ab0 = u168_ab1; // upper line becomes lower
+                    s += dw;
+                    d += dw;
+                }
+            } else { // 16
+                uint8x8_t u88;
+                uint8x16_t u816_a1, u816_b1;
+                uint16x8_t u168_ab0L, u168_ab0H, u168_ab1L, u168_ab1H;
+                u816_a1 = vld1q_u8(s); // pre-load the first row
+                u816_b1 = vld1q_u8(s+1);
+                u168_ab0L = vaddl_u8(vget_low_u8(u816_a1), vget_low_u16(u816_b1)); // horizontal add of current line
+                u168_ab0H = vaddl_u8(vget_high_u8(u816_a1), vget_high_u16(u816_b1));
+                s += dw;
+                for (int y = 0; y<16; y++) {
+                    u816_a1 = vld1q_u8(s);
+                    u816_b1 = vld1q_u8(s+1);
+                    u168_ab1L = vaddl_u8(vget_low_u8(u816_a1), vget_low_u8(u816_b1)); // horiz add of next line
+                    u168_ab1H = vaddl_u8(vget_high_u8(u816_a1), vget_high_u8(u816_b1));
+                    u168_ab0L = vaddq_u16(u168_ab0L, u168_ab1L); // vertical add
+                    u168_ab0H = vaddq_u16(u168_ab0H, u168_ab1H);
+                    u88 = vrshrn_n_u16(u168_ab0L, 2); // shift right with rounding
+                    vst1_u8(d, u88);
+                    u88 = vrshrn_n_u16(u168_ab0H, 2);
+                    vst1_u8(d+8, u88);
+                    u168_ab0L = u168_ab1L; // upper line becomes lower
+                    u168_ab0H = u168_ab1H;
+                    s += dw;
+                    d += dw;
+                }
+            }
+#else
             int dest_scan = dw - block_size;
             int a0, b0;
+            s += si; d += di;
             for (int y = 0; y < block_size; y++) {
-                a0 = s[si] + s[si+dw];
+                a0 = s[0] + s[dw];
                 for (int x = 0; x < block_size; x++) {
-                    b0 = s[si+1] + s[si+dw+1];
-                    d[di] = (a0+b0+2)>>2;
+                    b0 = s[1] + s[dw+1];
+                    d[0] = (a0+b0+2)>>2;
                     a0 = b0;
-                    si++; di++;
+                    s++; d++;
                 } // for x
-                si += dest_scan;
-                di += dest_scan;
+                s += dest_scan;
+                d += dest_scan;
             } // for y
+#endif // ARM_NEON
         }
             break;
 		PLM_MB_CASE(1, 0, 0, (d[di] + (s[si]) + 1) >> 1);
@@ -3606,8 +3700,8 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 
 	// Decode DC coefficient of intra-coded blocks
 	if (self->macroblock_intra) {
-		int predictor;
-		int dct_size;
+		int32_t predictor;
+		int32_t dct_size;
 
 		// DC prediction
 		int plane_index = block > 3 ? block - 3 : 0;
@@ -3759,7 +3853,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		di = ((self->mb_row * self->luma_width) << 2) + (self->mb_col << 3);
 	}
 
-	int *s = self->block_data;
+	int32_t *s = self->block_data;
 	int si = 0;
 	if (self->macroblock_intra) {
 		// Overwrite (no prediction)
@@ -3776,20 +3870,79 @@ void plm_video_decode_block(plm_video_t *self, int block) {
             s[0] = 0;
 		} else {
 			plm_video_idct(s, n);
+#ifdef ARM_NEON
+            {
+                // the source data is contiguous, the destination is not
+                int32x4_t in0_32, in1_32; // to hold 8 x uint32_t's which will get narrowed and clipped
+                uint16x8_t in0_16;
+                uint8x8_t in0_8;
+                d += di;
+                for (int yy=0; yy<8; yy++) { // do 8 rows of 8
+                    in0_32 = vld1q_s32(s);
+                    in1_32 = vld1q_s32(s+4);
+                    s += 8;
+                    in0_16 = vcombine_u16(vqmovn_s32(in0_32), vqmovn_s32(in1_32));
+                    in0_8 = vqmovn_u16(in0_16); // narrow and clamp to uint8_t
+                    vst1_u8(d, in0_8);
+                    d += dw;
+                }
+            }
+#else
 			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(s[si]));
+#endif
 			memset(self->block_data, 0, sizeof(self->block_data));
 		}
 	}
 	else {
 		// Add data to the predicted macroblock
 		if (n == 1) {
-			int value = (s[0] + 128) >> 8;
+			int16_t value = (s[0] + 128) >> 8;
+#ifdef ARM_NEON
+            // The challenge is that the 'value' is a signed 8-bit number that needs to be added
+            // to an unsigned 8-bit value and then clamped to 8-bits unsigned again
+            {
+                int16x8_t i16_0, i16_value;
+                uint8x8_t u88;
+                d += di;
+                i16_value = vdupq_n_s16(value);
+                for (int yy=0; yy<8; yy++) {
+                    u88 = vld1_u8(d);
+                    i16_0 = (int16x8_t)vmovl_u8(u88);  // widen and cast to i16
+                    i16_0 = vaddq_s16(i16_value, i16_0); // add value to 8 slots
+                    u88 = vqmovun_s16(i16_0); // narrow to uint8_t again
+                    vst1_u8(d, u88);
+                    d += dw;
+                }
+            }
+#else
 			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(d[di] + value));
+#endif
 			s[0] = 0;
 		}
 		else {
 			plm_video_idct(s, n);
+#ifdef ARM_NEON
+            {
+                int16x8_t i16_s, i16_d;
+                int32x4_t i32_0, i32_1;
+                uint8x8_t u88;
+                d += di;
+                for (int yy=0; yy<8; yy++) {
+                    i32_0 = vld1q_s32(s);
+                    i32_1 = vld1q_s32(s+4);
+                    s += 8;
+                    u88 = vld1_u8(d);
+                    i16_s = vcombine_s16(vmovn_s32(i32_0), vmovn_s32(i32_1)); // narrow to i16
+                    i16_d = (int16x8_t)vmovl_u8(u88);  // widen and cast to i16
+                    i16_d = vaddq_s16(i16_s, i16_d); // add dest to source
+                    u88 = vqmovun_s16(i16_d); // narrow to uint8_t again
+                    vst1_u8(d, u88);
+                    d += dw;
+                }
+            }
+#else
 			PLM_BLOCK_SET(d, di, dw, si, 8, 8, plm_clamp(d[di] + s[si]));
+#endif
 			memset(self->block_data, 0, sizeof(self->block_data));
 		}
 	}
